@@ -1,0 +1,103 @@
+---
+title: 'Application of Data Science to Economic Forecasting'
+author: "Sean Sanyal"
+date: "17/05/2020"
+output: html_document
+---
+
+```{r, message = FALSE, warning=FALSE}
+
+library(easypackages)
+libraries("tidyverse","vars","forecast","randomForest","rmarkdown", "tsibble", "quantmod" ,"stats", "dynlm", "readxl", "tsDyn", "jpeg", "knitr", "caret", "Metrics")
+```
+
+## Introduction
+
+This project aims to apply modern data science techniques to forecast real GDP of the United States of America in terms of lagged values of itself, Inflation, the 3-month Treasury Bill interest rate, the Term Spread (defined as the difference between the 10-year Government interest rate and the 3-month Treasury Bill interest rate), and the BAA credit spread (which is merely the difference of the interest rate of a BAA rated corporate bond portfolio and the 3-month Treasury Bill interest rate). The data was retrieved from FRED, Federal Reserve Bank of St. Louis (https://fred.stlouisfed.org/series, May 2017, 2020).
+
+With current events forcing popular attention to the global CoViD-19 pandemic of 2020, and consequently to the expected recession and contraction in the global economy in the near future, it has become even more important to study recessions and understand them. Predicting them is still controversial amongst economists. Indeed, Nyman and Ormerod (2017) use a Random Forest set-up to show that the algorithm performs better than traditional forecasts (by repeatedly training the model over different periods and forecasting with new inputs). They make a bold claim of prediction of the 2008-09 crash being possible from the data of 2007. This project does not go into the nitty-gritties of such an endeavour, instead, the scope of this project is quite humble. It is to investigate if a (relatively) modern machine learning algorithm can outperform an established and traditional econometric tool.   
+
+Random Forests have been used in macroeconomic forecasting with varying degrees of success (see Medeiros et al, 2018). Usually the problem of autocorrelated errors in time series prohibits random forests from being deployed. It is no surprise that it first evolved as primarily a classification algorithm in computer science. This method has seen some success in other quantitative data-driven fields like epidemiology and biostatistics. One of the more interesting attempts to use RF's in economic data (specifically, the eurozone) was by Baiu and D'Elia (2011), who actually ended up proving that a linear relationship was more successful than RF.
+
+VAR's on the other hand are stricly linear and capture linear dependencies among variables that change with time. It is basically the genralized version of the basic Autoregressive model (AR), which is for the univariate case. The most convenient feature of VAR, much like RF's, is that the underlying relationship does not need to be specifically known (but it needs to be linear, unlike RF). The only requirement is that the multiple time series should affect each other intertemporally. More precisely, variables that are expected to have explanatory power in any VAR need to have robust Granger-causality with respect to the other target variables for the belief in their importance to be validated.
+
+This project is basically divided into two parts. The first one applies a VAR to our dataset, and the second one uses a Random Forest to predict GDP growth in the United States of America. The main question is: Does the Random Forest outperform the Vector Autoregression on the same testing sample? Let's find out.
+
+## Extract, Transform, Load
+
+
+First, we take a look at the variables, by setting the variables to be time-series objects. We see that GDP is an I(1) non-stationary series, so we undertake appropriate differencing. Thus GDP growth is stationary. Undertaking similar transformations, we derive inflation (stationary) from CPI, and the 3-month T-Bill rate is also differenced (stationary transformation). The rest (BAA and Term spread) are stationary already, so no need to difference them.
+
+```{r, echo=TRUE, warning=FALSE, message = FALSE, fig.show='hide'}
+rf_data = read_xlsx("C:/Users/u1711172/OneDrive/Warwick/L100/YIII/340/rf data.xlsx", sheet = 1, col_types = c("text", rep("numeric", 5)))
+view(rf_data)
+
+rf_data$Date <- as.yearqtr(rf_data$Date, format = "%Y:0%q")
+
+df=rf_data[c(-242),]
+GDP = ts(df$GDP, start=c(1960, 1), end=c(2020, 1), frequency = 4)
+ggplot(df, aes(x=Date, y=GDP)) + geom_line() + xlab("")
+
+dgdp = ts(100*log(GDP[-1]/GDP[-length(GDP)]), start = c(1960, 1), end = c(2020, 1), frequency = 4)
+ggplot(df, aes(x=Date, y=dgdp)) + geom_line() + xlab("")
+
+CPI = ts(df$CPI, start=c(1960, 1), end=c(2020, 1), frequency = 4)
+infl = ts(100*log(CPI[-1]/CPI[-length(CPI)]), start=c(1960, 1), end=c(2020, 1), frequency = 4)
+ggplot(df, aes(x=Date, y=infl)) + geom_line() + xlab("")
+
+TBIL_3m = ts(df$TBIL_3m, start=c(1960, 1), end=c(2020, 1), frequency = 4)
+dtbil = ts(TBIL_3m[-1]/TBIL_3m[-length(TBIL_3m)], start=c(1960, 1), end=c(2020, 1), frequency = 4)
+ggplot(df, aes(x=Date, y=dtbil)) + geom_line() + xlab("")
+
+Termspread_10yr = ts(df$TermSpread_10yr, start=c(1960, 1), end=c(2020, 1), frequency = 4)
+ggplot(df, aes(x=Termspread_10yr, y=dtbil)) + geom_line() + xlab("")
+
+BAA_spread = ts(df$BAA_Spread, start=c(1960, 1), end=c(2020, 1), frequency = 4)
+ggplot(df, aes(x=BAA_spread, y=dtbil)) + geom_line() + xlab("")
+```
+
+## Vector Autoregressive Model
+
+First we undertake a VAR. Thus our VAR system of equations to predict GDP will look something like this:
+$$dgdp_t=\alpha + \sum_{t-k}^{t-1}\beta^1_{t-k}dgdp_{t-k} + \sum_{t-k}^{t-1}\beta^2_{t-k}infl_{t-k} + \sum_{t-k}^{t-1}\beta^3_{t-k}dtbil_{t-k} + \sum_{t-k}^{t-1}\beta^4_{t-k}TermSpread_{t-k} + \sum_{t-k}^{t-1}\beta^5_{t-k}BAAspread_{t-k}$$
+Here, we set k=3, implying we are using 3 lags.
+
+```{r, echo=c(5), warning=FALSE, message = FALSE}
+trainingdata = window(ts.union(dgdp, infl, dtbil, Termspread_10yr, BAA_spread), end=c(2013,4))
+testdata = window(ts.union(dgdp, infl, dtbil, Termspread_10yr, BAA_spread), start=c(2014,1))
+VAR_model = VAR(y = trainingdata, p = 3, type = c("const"))
+summary(VAR_model)
+RMSE_VAR=0.7596
+```
+We see that the RMSE is 0.75 on the test set (from Equation 1, of dgdp). 
+
+## Random Forest
+The RF was introduced by Breiman (2001) and extended from his previous work on bagging (Breiman, 1996).  This has made it one of the most popular methods in data mining. We know that random forests not particularly popular in time series data for robust predictions. This method is particularly effective for noisy and high-dimensional data which may exhibit non-linear relationships. The Random Forest is also a robust classifier in high-dimensional settings. Since our VAR was purely linear, Random Forest may do a better job at predicting GDP.
+
+Bergmeir, Hyndman and Koo (2018) found inter alia that k-fold cross-validation is actually valid given that the model is purely autoregressive (AR) (through simulation). Thus the use of k-fold CV is valid as long as the errors in our model are uncorrelated. Choosing an appropriate lag length would eliminate serial correlation in our model.
+
+We just forecast directly (training different models for each time distance) instead of recursively. This might be less efficient than recursion, but there is an advantages here: our model does not suffer from an accumulation of forecast errors which would have been made if we feedback each forecast to our algorithm as an input for the next forecast.
+
+```{r, echo=TRUE, warning=FALSE, message = FALSE, fig.show='hide'}
+
+set.seed(36)
+rfgdp <- randomForest(dgdp ~ ., data=trainingdata, importance=TRUE)
+print(rfgdp)
+dim(testdata)
+testdata[1:25, 2:5] <- sapply(testdata[1:25, 2:5], as.numeric)
+pred.rf <- predict(rfgdp, newdata=testdata, n.ahead=15)
+```
+Now, to find the Root Mean Squared Error of this forecast, so that we can compare this to our VAR:
+
+
+```{r, echo=TRUE, warning=FALSE, message=FALSE}
+rmse(dgdp, pred.rf)
+```
+
+Thus the RMSE of our Random Forest is 0.91.
+
+## Conclusion
+
+It is evident that our VAR has outperformed the Random Forest. The RMSE of our Random Forest is 0.91 on our test set. It is important to note that we haven't used any cross-validation here, so results might be different, although it is not expected, given that cross-validation helps against overfitting, and that does not seem to be our problem here. It is important to remember that our split between training and test sets was 80% and 20% respectively. Finally, it seems to be the case that for financial and economic variables, Random Forests can be a good tool for selecting the most important predictor variables, however, it's relative performance against the Vector Autoregression is still an open question. 
+
+
